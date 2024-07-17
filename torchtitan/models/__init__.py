@@ -22,5 +22,5 @@ model_name_to_cls = {
 model_name_to_tokenizer = {
     "llama2": "sentencepiece",
     "llama3": "tiktoken",
-    "duet": "sentencepiece",
+    "duet": "tiktoken",
 }
