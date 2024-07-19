@@ -28,6 +28,7 @@ class ModelArgs:
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
+    vision_patch_size: int = 32
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -356,6 +357,11 @@ class Transformer(nn.Module):
         self.n_layers = model_args.n_layers
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.embed_vision_patch = nn.Linear(
+            model_args.vision_patch_size * model_args.vision_patch_size * 3,  # 32 * 32 * 3,
+            model_args.dim,
+            bias=False,
+        )
 
         # TODO persistent should be set to false, since this buffer can be recomputed.
         # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
@@ -414,19 +420,61 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        vision_patches: Optional[torch.Tensor] = None,
+        vision_patch_indices: Optional[torch.Tensor] = None,
+    ):
         """
         Perform a forward pass through the Transformer model.
 
+        This implements the forward pass based on the SOLO architecture.
+        Paper: https://arxiv.org/abs/2407.06438
+
         Args:
             tokens (torch.Tensor): Input token indices.
+            vision_patches (Optional[torch.Tensor]): Vision patches tensor.
+            vision_patch_indices (Optional[torch.Tensor]): Indices for vision patches.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = tokens
+
+        # if the token embeddings are not None
+        if self.tok_embeddings is not None:
+            h = self.tok_embeddings(tokens)
+
+            if vision_patch_indices is not None:
+                assert (
+                    vision_patch_indices.shape == tokens.shape
+                ), "vision_patch_indices and tokens should have the same shape"
+
+                # === Handle vision patches ===
+                if vision_patches is not None and vision_patches.size(0) > 0:
+                    vision_embeds = self.embed_vision_patch(
+                        vision_patches
+                    )  # (n_patches, hidden_size)
+                    vision_embeds = torch.cat(
+                        [
+                            vision_embeds,
+                            torch.zeros(1, self.model_args.dim).to(
+                                vision_embeds.device
+                            ),  # add a dummy token (for text)
+                        ],
+                    )  # (n_patches + 1, hidden_size)
+                    # arrange embeddings according to vision_patch_indices
+                    # - text tokens are -1 (map to the dummy zero tensor)
+                    # - vision tokens are 0~n_patches (map to the corresponding vision_embeds)
+                    vision_embeds = vision_embeds[
+                        vision_patch_indices
+                    ]  # (batch_size, seq_length, hidden_size)
+
+                    # merge vision_embeds with inputs_embeds
+                    h += vision_embeds
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
