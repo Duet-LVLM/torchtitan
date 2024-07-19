@@ -14,12 +14,12 @@ from torchtitan.parallelisms.parallelize_llama import parallelize_llama, pipelin
 models_parallelize_fns = {
     "llama2": parallelize_llama,
     "llama3": parallelize_llama,
-    "duet": parallelize_llama,
+    "solo": parallelize_llama,
 }
 models_pipelining_fns = {
     "llama2": pipeline_llama,
     "llama3": pipeline_llama,
-    "duet": pipeline_llama,
+    "solo": pipeline_llama,
 }
 
 
