@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
+import numpy as np
 
 try:
     from torchdata.stateful_dataloader import StatefulDataLoader
@@ -249,11 +250,13 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         # variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: List[int] = []
-        
+        self._all_vision_patches: List[int] = []
+        self._all_vision_patches_indices: List[int] = []
+        # self._all_labels: List[int] = []
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
-
+        NON_VISION_TOKEN = -1
         while True:
             for sample in self._get_data_iter():
                 content = sample['content']
@@ -266,10 +269,50 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     sample_text = content_aft['text']
                     image = content_bef['image_url']['url']
                 patches = convert_image_base64_to_patches(image)
+                n_rows, n_cols = patches.shape[:2]
+                n_patches = n_rows * n_cols
+                patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
+
+        
+                
+            
                 
                 
                 
+                # ---
+                img_tokens = ["<vision>"]
+                cur_patch_indices = [NON_VISION_TOKEN]
+                for row_idx in range(n_rows):
+                    for col_idx in range(n_cols):
+                        if row_idx != 0 and col_idx == 0: # when new row starts
+                            img_tokens.append(f"<vrow_sep>")
+                            cur_patch_indices.append(NON_VISION_TOKEN)
+                        img_tokens.append(f"<vpatch>")
+                        cur_patch_indices.append(len(vision_patches) + row_idx * n_cols + col_idx)
+                img_tokens.append("<vision>")
+                cur_patch_indices.append(NON_VISION_TOKEN)
                 
+                # ---
+                cur_tokens = torch.Tensor(self._tokenizer.convert_tokens_to_ids(img_tokens))
+                cur_attention_mask = [1] * len(cur_tokens)
+                assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
+                
+                tokens.extend(cur_tokens)
+                vision_patch_indices.extend(cur_patch_indices)
+                vision_patches.extend(patches.numpy().astype(np.float16))
+                
+                
+                sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
+                self._all_tokens.extend(sample_tokens)
+                self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
+                
+                
+                
+
+
+                        
+                        
+                        
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
                 self._sample_idx += 1
