@@ -250,7 +250,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         # variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: List[int] = []
-        self._all_vision_patches: List[int] = []
+        self._all_vision_patches: List[np.ndarray] = [] # wrong type 
         self._all_vision_patches_indices: List[int] = []
         # self._all_labels: List[int] = []
 
@@ -272,13 +272,6 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                 n_rows, n_cols = patches.shape[:2]
                 n_patches = n_rows * n_cols
                 patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
-
-        
-                
-            
-                
-                
-                
                 # ---
                 img_tokens = ["<vision>"]
                 cur_patch_indices = [NON_VISION_TOKEN]
@@ -288,35 +281,23 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                             img_tokens.append(f"<vrow_sep>")
                             cur_patch_indices.append(NON_VISION_TOKEN)
                         img_tokens.append(f"<vpatch>")
-                        cur_patch_indices.append(len(vision_patches) + row_idx * n_cols + col_idx)
+                        cur_patch_indices.append(len(self._all_vision_patches) + row_idx * n_cols + col_idx)
                 img_tokens.append("<vision>")
                 cur_patch_indices.append(NON_VISION_TOKEN)
                 
-                # ---
-                cur_tokens = torch.Tensor(self._tokenizer.convert_tokens_to_ids(img_tokens))
-                cur_attention_mask = [1] * len(cur_tokens)
+                cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
                 assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
                 
-                tokens.extend(cur_tokens)
-                vision_patch_indices.extend(cur_patch_indices)
-                vision_patches.extend(patches.numpy().astype(np.float16))
-                
+                self._all_tokens.extend(cur_tokens)
+                self._all_vision_patch_indices.extend(cur_patch_indices)
+                self._all_vision_patches.extend(patches.numpy().astype(np.float16))
                 
                 sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
                 self._all_tokens.extend(sample_tokens)
                 self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
                 
-                
-                
-
-
-                        
-                        
-                        
-                sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
-                self._all_tokens.extend(sample_tokens)
+                  
                 self._sample_idx += 1
-
                 while len(self._all_tokens) >= max_buffer_token_len:
                     x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
                     # update tokens to the remaining tokens
