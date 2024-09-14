@@ -350,16 +350,23 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = timer()
             batch = next(data_iterator)
-            input_ids, labels = batch
+            input_ids, labels, visual_patches_indices, visual_patches = batch
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
+            visual_patches_indices = visual_patches_indices.cuda()
+            visual_patches = visual_patches.cuda()
+            
+            
             optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
                 # pipeline parallel forward / backward inside step() call
+                
+                
+                # not working here, need to fix
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 with loss_parallel_ctx():
