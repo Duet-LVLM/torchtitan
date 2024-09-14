@@ -6,3 +6,4 @@ sentencepiece
 tiktoken
 blobfile
 tabulate
+torchvision == 0.19.1
