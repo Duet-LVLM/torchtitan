@@ -250,9 +250,11 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         # variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: List[int] = []
-        self._all_vision_patches: List[np.ndarray] = [] # wrong type 
+        self._all_vision_patches: List[np.ndarray] = []
         self._all_vision_patches_indices: List[int] = []
-        # self._all_labels: List[int] = []
+        self._all_labels: List[int] = []
+
+
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
@@ -276,6 +278,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                 # ---
                 img_tokens = ["<vision>"]
                 cur_patch_indices = [NON_VISION_TOKEN]
+                
                 for row_idx in range(n_rows):
                     for col_idx in range(n_cols):
                         if row_idx != 0 and col_idx == 0: # when new row starts
@@ -293,23 +296,38 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                 self._all_tokens.extend(cur_tokens)
                 self._all_vision_patches_indices.extend(cur_patch_indices)
                 self._all_vision_patches.extend(patches.numpy().astype(np.float16))
+                self._all_labels.extend([-100] * len(cur_tokens))
                 
                 sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
                 self._all_tokens.extend(sample_tokens)
                 self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
+                self._all_labels.extend(sample_tokens)
+                
                   
                 self._sample_idx += 1
                 while len(self._all_tokens) >= max_buffer_token_len:
                     x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
-                    
-                    
+                    input_ids = x[:-1]
+                    x = torch.LongTensor(self._all_labels[:max_buffer_token_len])
+                    label = x[1:]
+                    indices = torch.LongTensor(self._all_vision_patches_indices[:max_buffer_token_len])
+                    # get the max number from indices
+                    max_idx = indices.max() + 1
+                    indices = indices[:-1]
+                    vision_patches = torch.FloatTensor(self._all_vision_patches[:max_idx])
                     
                     
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
-                    input = x[:-1]
-                    label = x[1:]
-                    yield input, label
+                    self._all_labels = self._all_labels[max_buffer_token_len:]
+                    self._all_vision_patches_indices = self._all_vision_patches_indices[max_buffer_token_len:]
+                    self._all_vision_patches = self._all_vision_patches[max_idx:]
+                    
+                    yield input_ids, label, indices, vision_patches
+                    
+                    
+                    
+                    
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
