@@ -271,6 +271,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                 patches = convert_image_base64_to_patches(image)
                 n_rows, n_cols = patches.shape[:2]
                 n_patches = n_rows * n_cols
+    
                 patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
                 # ---
                 img_tokens = ["<vision>"]
@@ -285,21 +286,25 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                 img_tokens.append("<vision>")
                 cur_patch_indices.append(NON_VISION_TOKEN)
                 
-                cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
+                cur_tokens = self._tokenizer.encode(''.join(img_tokens), bos=False, eos=False)
+                # cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
                 assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
                 
                 self._all_tokens.extend(cur_tokens)
-                self._all_vision_patch_indices.extend(cur_patch_indices)
+                self._all_vision_patches_indices.extend(cur_patch_indices)
                 self._all_vision_patches.extend(patches.numpy().astype(np.float16))
                 
                 sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
                 self._all_tokens.extend(sample_tokens)
                 self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
-                
                   
                 self._sample_idx += 1
                 while len(self._all_tokens) >= max_buffer_token_len:
                     x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
+                    
+                    
+                    
+                    
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     input = x[:-1]

@@ -62,8 +62,11 @@ class TikTokenizer(Tokenizer):
             "<|eot_id|>",  # end of turn
         ] + [
             f"<|reserved_special_token_{i}|>"
-            for i in range(5, self.num_reserved_special_tokens - 5)
+            for i in range(5, self.num_reserved_special_tokens - 8)
+        ] + [
+            "<vision>", "<vrow_sep>", "<vpatch>"
         ]
+
         self.special_tokens = {
             token: num_base_tokens + i for i, token in enumerate(special_tokens)
         }
@@ -118,9 +121,10 @@ class TikTokenizer(Tokenizer):
           to special tokens to be encoded as special tokens.
         """
         assert type(s) is str
-        allowed_special = allowed_special or set()
-        disallowed_special = disallowed_special or ()
-
+        # allowed_special = allowed_special or set()
+        allowed_special = "all"
+        # disallowed_special = disallowed_special or ()
+        disallowed_special = ()
         # The tiktoken tokenizer can handle <=400k chars without
         # pyo3_runtime.PanicException.
         TIKTOKEN_MAX_ENCODE_CHARS = 400_000
