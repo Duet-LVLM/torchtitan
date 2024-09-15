@@ -404,10 +404,9 @@ def main(job_config: JobConfig):
                     # get the indices of all >= 0 items in the visual_patches_indices
                     _, indices = torch.where(visual_patches_indices != -1)
                     
-                    pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices, noise_patches)
+                    pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
                     # pred_diffusion: (bs, seq_len, 3072)
                     pred_diffusion = pred_diffusion[:, indices, :]
-                    
                     
                     if pred_diffusion.shape[1] != label_diffusion.shape[1]:
                         label_diffusion = label_diffusion[:, :-1, :]

@@ -320,6 +320,11 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     vision_patches = torch.FloatTensor(np.array(self._all_vision_patches[:max_idx]))
                     # logger.info(f"vision_patches shape: {vision_patches.shape}")
                     noise_patches = torch.FloatTensor(self.create_noise(vision_patches.shape[0]))
+                    # add noise_patches to the vision_patches
+                    betas = self.get_betas()
+                    t = torch.randint(0, 1000, (1,)).item()
+                    alpha_t = torch.prod(1 - betas[:t+1])
+                    noisy_image_patches = alpha_t.sqrt() * vision_patches + (1 - alpha_t).sqrt() * noise_patches
                     
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
@@ -327,7 +332,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     self._all_vision_patches_indices = self.modify_numbers_numpy(self._all_vision_patches_indices[max_buffer_token_len:], max_idx.item())
                     self._all_vision_patches = self._all_vision_patches[max_idx:]
                     
-                    yield input_ids, label, indices, vision_patches, noise_patches
+                    yield input_ids, label, indices, noisy_image_patches, noise_patches
                     
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
@@ -339,6 +344,13 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     f"Dataset {self.dataset_name} is being re-looped. "
                     "Loss related metrics might be misleading."
                 )
+    
+    # Noise Schedule (linear beta)
+    def get_betas(self, T=1000, beta_start=0.0001, beta_end=0.02):
+        return torch.linspace(beta_start, beta_end, T)
+    
+    
+    
     
     
     def modify_numbers_numpy(self, nums, max_idx):

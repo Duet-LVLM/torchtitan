@@ -425,8 +425,7 @@ class Transformer(nn.Module):
         self,
         tokens: torch.Tensor,
         vision_patches: Optional[torch.Tensor] = None,
-        vision_patch_indices: Optional[torch.Tensor] = None,
-        noise_patches: Optional[torch.Tensor] = None,
+        vision_patch_indices: Optional[torch.Tensor] = None
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -458,8 +457,7 @@ class Transformer(nn.Module):
 
                 # === Handle vision patches ===
                 if vision_patches is not None and vision_patches.size(0) > 0:
-                    # logger.info(f"vision_patches: {vision_patches.shape}, noise_patches: {noise_patches.shape}")
-                    vision_patches = vision_patches + noise_patches
+                    # vision_patches = vision_patches + noise_patches
                     
                     vision_embeds = self.embed_vision_patch(
                         vision_patches
