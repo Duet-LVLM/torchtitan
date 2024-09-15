@@ -253,6 +253,9 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         self._all_vision_patches: List[np.ndarray] = []
         self._all_vision_patches_indices: List[int] = []
         self._all_labels: List[int] = []
+        self._all_noise: List[np.ndarray] = []
+        
+        
 
 
 
@@ -314,8 +317,9 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     # get the max number from indices
                     max_idx = indices.max() + 1
                     indices = indices[:-1]
-                    vision_patches = torch.FloatTensor(self._all_vision_patches[:max_idx])
-                    
+                    vision_patches = torch.FloatTensor(np.array(self._all_vision_patches[:max_idx]))
+                    # logger.info(f"vision_patches shape: {vision_patches.shape}")
+                    noise_patches = torch.FloatTensor(self.create_noise(vision_patches.shape[0]))
                     
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
@@ -323,7 +327,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     self._all_vision_patches_indices = self.modify_numbers_numpy(self._all_vision_patches_indices[max_buffer_token_len:], max_idx.item())
                     self._all_vision_patches = self._all_vision_patches[max_idx:]
                     
-                    yield input_ids, label, indices, vision_patches
+                    yield input_ids, label, indices, vision_patches, noise_patches
                     
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
@@ -343,6 +347,11 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         return arr.tolist()
 
 
+    def create_noise(self, n_patches):
+        return np.random.normal(0, 1, (n_patches, 3072))
+    
+    
+    
     def _get_data_iter(self):
         if self._sample_idx == 0:
             return iter(self._data)

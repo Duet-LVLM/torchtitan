@@ -37,6 +37,7 @@ from torchtitan.parallelisms import (
     models_pipelining_fns,
     ParallelDims,
 )
+from copy import deepcopy
 from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import (
@@ -201,6 +202,13 @@ def main(job_config: JobConfig):
         # logger.info(f"pred: {pred.flatten(0,1).shape}, labels: {labels.flatten(0,1).shape}")
         return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
+    
+    def loss_fn_diffusion(pred, labels):
+        # implement the MSE loss for the diffusion model
+        return F.mse_loss(pred, labels)
+    
+    
+    
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
@@ -351,7 +359,7 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = timer()
             batch = next(data_iterator)
-            input_ids, labels, visual_patches_indices, visual_patches = batch
+            input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
@@ -359,6 +367,8 @@ def main(job_config: JobConfig):
             labels = labels.cuda()
             visual_patches_indices = visual_patches_indices.cuda()
             visual_patches = visual_patches.cuda()
+            noise_patches = noise_patches.cuda()
+            
             
             
             optimizers.zero_grad()
@@ -388,9 +398,22 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with loss_parallel_ctx():
-                    pred = model(input_ids, visual_patches, visual_patches_indices)
-                    # logger.info(f"pred: {pred.shape}, labels: {labels.shape}")
-                    loss = loss_fn(pred, labels)
+                    # # only support batch size 1. Need to fix the code when batch size > 1 for the indices extraction for image patches
+                    assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
+                    label_diffusion = deepcopy(noise_patches) 
+                    # get the indices of all >= 0 items in the visual_patches_indices
+                    _, indices = torch.where(visual_patches_indices != -1)
+                    
+                    pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices, noise_patches)
+                    # pred_diffusion: (bs, seq_len, 3072)
+                    pred_diffusion = pred_diffusion[:, indices, :]
+                    
+                    
+                    if pred_diffusion.shape[1] != label_diffusion.shape[1]:
+                        label_diffusion = label_diffusion[:, :-1, :]
+                    # logger.info(f"pred_diffusion: {pred_diffusion.shape}, label_diffusion: {label_diffusion.shape}")
+                    loss = loss_fn(pred, labels) + loss_fn_diffusion(pred_diffusion, label_diffusion)
+                    
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred

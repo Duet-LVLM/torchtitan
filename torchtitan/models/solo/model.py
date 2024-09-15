@@ -381,6 +381,7 @@ class Transformer(nn.Module):
         )
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.diffusion_head = nn.Linear(model_args.dim, 3072, bias=False)
         self.init_weights()
 
     def init_weights(self):
@@ -425,6 +426,7 @@ class Transformer(nn.Module):
         tokens: torch.Tensor,
         vision_patches: Optional[torch.Tensor] = None,
         vision_patch_indices: Optional[torch.Tensor] = None,
+        noise_patches: Optional[torch.Tensor] = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -436,6 +438,7 @@ class Transformer(nn.Module):
             tokens (torch.Tensor): Input token indices.
             vision_patches (Optional[torch.Tensor]): Vision patches tensor.
             vision_patch_indices (Optional[torch.Tensor]): Indices for vision patches.
+            noise_patches (Optional[torch.Tensor]): Noise patches tensor that used for diffusion loss.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
@@ -455,6 +458,9 @@ class Transformer(nn.Module):
 
                 # === Handle vision patches ===
                 if vision_patches is not None and vision_patches.size(0) > 0:
+                    # logger.info(f"vision_patches: {vision_patches.shape}, noise_patches: {noise_patches.shape}")
+                    vision_patches = vision_patches + noise_patches
+                    
                     vision_embeds = self.embed_vision_patch(
                         vision_patches
                     )  # (n_patches, hidden_size)
@@ -479,7 +485,8 @@ class Transformer(nn.Module):
         # logger.info(h.device)
         h = self.norm(h) if self.norm else h
         output = self.output(h).float() if self.output else h
-        return output
+        output_diffusion = self.diffusion_head(h).float() if self.diffusion_head else h
+        return output, output_diffusion
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
