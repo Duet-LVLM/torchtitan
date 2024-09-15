@@ -321,7 +321,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     self._all_labels = self._all_labels[max_buffer_token_len:]
                     self._all_vision_patches_indices = self._all_vision_patches_indices[max_buffer_token_len:]
-                    self._all_vision_patches = self._all_vision_patches[max_idx:]
+                    self._all_vision_patches = (np.array(self._all_vision_patches[max_idx:]) - max_idx.item()).tolist()
                     
                     yield input_ids, label, indices, vision_patches
                     
