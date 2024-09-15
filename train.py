@@ -198,6 +198,7 @@ def main(job_config: JobConfig):
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
+        # logger.info(f"pred: {pred.flatten(0,1).shape}, labels: {labels.flatten(0,1).shape}")
         return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
     # build model (using meta init)
@@ -387,7 +388,8 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with loss_parallel_ctx():
-                    pred = model(input_ids)
+                    pred = model(input_ids, visual_patches, visual_patches_indices)
+                    # logger.info(f"pred: {pred.shape}, labels: {labels.shape}")
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory

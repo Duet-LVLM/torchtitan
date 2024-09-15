@@ -320,15 +320,11 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     self._all_labels = self._all_labels[max_buffer_token_len:]
-                    self._all_vision_patches_indices = self._all_vision_patches_indices[max_buffer_token_len:]
-                    self._all_vision_patches = (np.array(self._all_vision_patches[max_idx:]) - max_idx.item()).tolist()
+                    self._all_vision_patches_indices = self.modify_numbers_numpy(self._all_vision_patches_indices[max_buffer_token_len:], max_idx.item())
+                    self._all_vision_patches = self._all_vision_patches[max_idx:]
                     
                     yield input_ids, label, indices, vision_patches
                     
-                    
-                    
-                    
-
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
                 break
@@ -339,6 +335,13 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     f"Dataset {self.dataset_name} is being re-looped. "
                     "Loss related metrics might be misleading."
                 )
+    
+    
+    def modify_numbers_numpy(self, nums, max_idx):
+        arr = np.array(nums)
+        arr[arr != -1] -= max_idx
+        return arr.tolist()
+
 
     def _get_data_iter(self):
         if self._sample_idx == 0:

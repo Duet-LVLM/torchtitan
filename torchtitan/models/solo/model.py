@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.norms import create_norm
-
+from torchtitan.logging_utils import logger
 
 @dataclass
 class ModelArgs:
@@ -460,25 +460,23 @@ class Transformer(nn.Module):
                     )  # (n_patches, hidden_size)
                     vision_embeds = torch.cat(
                         [
-                            vision_embeds,
-                            torch.zeros(1, self.model_args.dim).to(
-                                vision_embeds.device
-                            ),  # add a dummy token (for text)
-                        ],
-                    )  # (n_patches + 1, hidden_size)
+                            vision_embeds.squeeze(), # 【993, 4096]
+                            torch.zeros(1, self.model_args.dim).to(vision_embeds.device),  # add a dummy token (for text)
+                        ]
+                    )  # (n_patches + 1, hidden_size) # [1, 994, 4096]
                     # arrange embeddings according to vision_patch_indices
                     # - text tokens are -1 (map to the dummy zero tensor)
                     # - vision tokens are 0~n_patches (map to the corresponding vision_embeds)
+                    # logger.info(f"vision_patch_indices: {vision_patch_indices.shape}, vision_embeds: {vision_embeds.shape}")
                     vision_embeds = vision_embeds[
                         vision_patch_indices
                     ]  # (batch_size, seq_length, hidden_size)
-
                     # merge vision_embeds with inputs_embeds
                     h += vision_embeds
-
-        for layer in self.layers.values():
+      
+        for i, layer in enumerate(self.layers.values()):
             h = layer(h, self.freqs_cis)
-
+        # logger.info(h.device)
         h = self.norm(h) if self.norm else h
         output = self.output(h).float() if self.output else h
         return output
