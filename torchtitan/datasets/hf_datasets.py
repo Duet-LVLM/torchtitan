@@ -325,13 +325,13 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     t = torch.randint(0, 1000, (1,)).item()
                     alpha_t = torch.prod(1 - betas[:t+1])
                     noisy_image_patches = alpha_t.sqrt() * vision_patches + (1 - alpha_t).sqrt() * noise_patches
+                    # assert indices.shape == input_ids.shape, f"{indices.shape} != {input_ids.shape} {len(self._all_vision_patches_indices)}"
                     
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     self._all_labels = self._all_labels[max_buffer_token_len:]
                     self._all_vision_patches_indices = self.modify_numbers_numpy(self._all_vision_patches_indices[max_buffer_token_len:], max_idx.item())
                     self._all_vision_patches = self._all_vision_patches[max_idx:]
-                    
                     yield input_ids, label, indices, noisy_image_patches, noise_patches
                     
             if not self.infinite:
