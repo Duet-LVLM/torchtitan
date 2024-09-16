@@ -8,7 +8,7 @@ import contextlib
 import gc
 import os
 import time
-
+import wandb
 from dataclasses import dataclass, field
 from datetime import timedelta
 from io import BytesIO
@@ -141,7 +141,6 @@ def build_optimizers(model_parts, job_config: JobConfig):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
-
     # used for colorful printing
     color = Color if job_config.metrics.enable_color_printing else NoColor
 
@@ -343,7 +342,22 @@ def main(job_config: JobConfig):
     data_loading_times: List[float] = []
     time_last_log = timer()
     gpu_memory_monitor.reset_peak_stats()
-
+    if torch.distributed.get_rank() == 0:
+        logger.info(f"init wandb")
+        wandb.login()
+        run = wandb.init(
+        # Set the project where this run will be logged
+            project="TEST",
+            # Track hyperparameters and run metadata
+            config={
+                "learning_rate": 0.01,
+                "epochs": 10,
+            },
+            name='test'
+    )
+    
+    
+    
     # train loop
     logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_enable_profiling(
@@ -411,7 +425,11 @@ def main(job_config: JobConfig):
                     if pred_diffusion.shape[1] != label_diffusion.shape[1]:
                         label_diffusion = label_diffusion[:, :-1, :]
                     # logger.info(f"pred_diffusion: {pred_diffusion.shape}, label_diffusion: {label_diffusion.shape}")
-                    loss = loss_fn(pred, labels) + loss_fn_diffusion(pred_diffusion, label_diffusion)
+                    loss_language = loss_fn(pred, labels)
+                    loss_difussion = loss_fn_diffusion(pred_diffusion, label_diffusion)
+                    loss = loss_language + loss_difussion
+                    if torch.distributed.get_rank() == 0:
+                        wandb.log({"loss_language": loss_language, "loss_diffusion": loss_difussion})
                     
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory

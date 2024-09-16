@@ -20,3 +20,4 @@ _remote_module_non_scriptable.py
 outputs
 Meta-Llama-3-8B
 llama3-8B
+wandb
