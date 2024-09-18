@@ -373,18 +373,27 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = timer()
             batch = next(data_iterator)
-            input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
+            # send all items to GPU, and use tuple
+            batch = tuple(item.cuda() for item in batch)
+            if len(batch) == 5:
+                # diffusion loss
+                input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
+                loss_type = "Diffusion"
+            else:
+                if len(batch) == 2:
+                    # language-only 
+                    input_ids, labels = batch
+                    visual_patches_indices, visual_patches, noise_patches = None, None, None
+                    loss_type = "Language"
+                else:
+                    input_ids, labels, visual_patches_indices, visual_patches = batch
+                    noise_patches = None
+                    loss_type = "Image-Conditioned Language"
+                    
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
-            visual_patches_indices = visual_patches_indices.cuda()
-            visual_patches = visual_patches.cuda()
-            noise_patches = noise_patches.cuda()
-            
-            
-            
+
             optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
@@ -414,22 +423,22 @@ def main(job_config: JobConfig):
                 with loss_parallel_ctx():
                     # # only support batch size 1. Need to fix the code when batch size > 1 for the indices extraction for image patches
                     assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
-                    label_diffusion = deepcopy(noise_patches) 
+                    # label_diffusion = deepcopy(noise_patches) 
                     # get the indices of all >= 0 items in the visual_patches_indices
-                    _, indices = torch.where(visual_patches_indices != -1)
-                    
                     pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
                     # pred_diffusion: (bs, seq_len, 3072)
-                    pred_diffusion = pred_diffusion[:, indices, :]
+                    if noise_patches is not None:
+                        # do diffusion
+                        _, indices = torch.where(visual_patches_indices != -1)
+                        pred_diffusion = pred_diffusion[:, indices, :]
+                        if pred_diffusion.shape[1] != noise_patches.shape[1]:
+                            noise_patches = noise_patches[:, :-1, :]
+                        loss = loss_fn_diffusion(pred_diffusion, noise_patches)
+                    else:
+                        loss = loss_fn(pred, labels)
                     
-                    if pred_diffusion.shape[1] != label_diffusion.shape[1]:
-                        label_diffusion = label_diffusion[:, :-1, :]
-                    # logger.info(f"pred_diffusion: {pred_diffusion.shape}, label_diffusion: {label_diffusion.shape}")
-                    loss_language = loss_fn(pred, labels)
-                    loss_difussion = loss_fn_diffusion(pred_diffusion, label_diffusion)
-                    loss = loss_language + loss_difussion
                     if torch.distributed.get_rank() == 0:
-                        wandb.log({"loss_language": loss_language, "loss_diffusion": loss_difussion})
+                        wandb.log({loss_type: loss})
                     
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory

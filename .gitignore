@@ -12,7 +12,8 @@ out
 wandb
 
 torchtitan/datasets/**/*.model
-
+torchtitan/datasets/raw_data
+torchtitan/datasets/processed
 # temp files
 *.log
 error.json

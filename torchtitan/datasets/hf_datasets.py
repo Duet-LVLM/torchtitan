@@ -31,7 +31,8 @@ from torchtitan.datasets.image_utils import convert_image_base64_to_patches
 _supported_datasets = {
     "c4_mini": "torchtitan/datasets/c4_mini",
     "c4": "allenai/c4",
-    'imagenet': "/shared/nas/data/m1/yangyic3/Multimodal-Mistral/data/processed/imagenet/"
+    'imagenet': "/shared/nas/data/m1/yangyic3/Multimodal-Mistral/data/processed/imagenet/",
+    "imagenet+dclm": "/shared/nas/data/m1/yangyic3/Multimodal-Mistral/data/processed/imagenet+dclm/"
 }
 
 
@@ -237,18 +238,26 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
             ds = load_dataset(dataset_path, name="en", split="train", streaming=True)
         elif dataset_name == 'imagenet':
             ds = load_dataset(dataset_path, split="train", streaming=True)
+        elif dataset_name == 'imagenet+dclm':
+            ds = load_dataset("/shared/nas/data/m1/yangyic3/Multimodal-Mistral/data/processed/imagenet/", split="train", streaming=True)
+            ds_2 = load_dataset("torchtitan/datasets/processed/dclm/", split="train", streaming=True)  
         else:
             ds = load_dataset(dataset_path, split="train")
 
         # TODO: support shuffling and checkpointing
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
+        self._data_2 = split_dataset_by_node(ds_2, rank, world_size)
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
+        self.language_data_ratio = 0 # 0.7
+        self.diffusion_prob = 0.66 # 0.66
 
         # variables for checkpointing
         self._sample_idx = 0
+        
+        # diffusion data, language-conditioned image generation
         self._all_tokens: List[int] = []
         self._all_vision_patches: List[np.ndarray] = []
         self._all_vision_patches_indices: List[int] = []
@@ -256,59 +265,160 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         self._all_noise: List[np.ndarray] = []
         
         
+        
+        # language-only data
+        self._all_tokens_language: List[int] = []
+        
+        # image-conditioned language generation (e.g., image classification, image captioning, visual instruction following)
+        self._all_tokens_vl: List[int] = []
+        self._all_vision_patches_vl: List[np.ndarray] = []
+        self._all_vision_patches_indices_vl: List[int] = []
+        self._all_labels_vl: List[int] = []
+        
+        
+        
+        
+        
+        
+        
+    def add_vl_data(self, sample):
+        NON_VISION_TOKEN = -1
+        content = sample['content']
+        content_bef = content[0]
+        content_aft = content[1]
+        if content_bef['type'] == 'text':
+            sample_text = content_bef['text']
+            image = content_aft['image_url']['url']
+        else:
+            sample_text = content_aft['text']
+            image = content_bef['image_url']['url']
+        patches = convert_image_base64_to_patches(image)
+        n_rows, n_cols = patches.shape[:2]
+        n_patches = n_rows * n_cols
 
+        patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
+        # ---
+        img_tokens = ["<vision>"]
+        cur_patch_indices = [NON_VISION_TOKEN]
+        
+        for row_idx in range(n_rows):
+            for col_idx in range(n_cols):
+                if row_idx != 0 and col_idx == 0: # when new row starts
+                    img_tokens.append(f"<vrow_sep>")
+                    cur_patch_indices.append(NON_VISION_TOKEN)
+                img_tokens.append(f"<vpatch>")
+                cur_patch_indices.append(len(self._all_vision_patches_vl) + row_idx * n_cols + col_idx)
+        img_tokens.append("<vision>")
+        cur_patch_indices.append(NON_VISION_TOKEN)
+        
+        cur_tokens = self._tokenizer.encode(''.join(img_tokens), bos=False, eos=False)
+        # cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
+        assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
+        
+        self._all_tokens_vl.extend(cur_tokens)
+        self._all_vision_patches_indices_vl.extend(cur_patch_indices)
+        self._all_vision_patches_vl.extend(patches.numpy().astype(np.float16))
+        self._all_labels_vl.extend([-100] * len(cur_tokens))
+        
+        
+        sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
+        self._all_tokens_vl.extend(sample_tokens)
+        self._all_vision_patches_indices_vl.extend([NON_VISION_TOKEN] * len(sample_tokens))
+        self._all_labels_vl.extend(sample_tokens)
+        
+        
+    
+        
+
+    def add_diffusion_data(self, sample):
+        NON_VISION_TOKEN = -1
+        content = sample['content']
+        content_bef = content[0]
+        content_aft = content[1]
+        if content_bef['type'] == 'text':
+            sample_text = content_bef['text']
+            image = content_aft['image_url']['url']
+        else:
+            sample_text = content_aft['text']
+            image = content_bef['image_url']['url']
+        patches = convert_image_base64_to_patches(image)
+        n_rows, n_cols = patches.shape[:2]
+        n_patches = n_rows * n_cols
+        patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
+        
+        t = torch.randint(0, 1000, (1,)).item()
+        alpha_t = torch.prod(1 - self.betas[:t+1])
+        
+        sample_tokens = self._tokenizer.encode(sample_text + " <{}>".format(t), bos=False, eos=False)
+        self._all_tokens.extend(sample_tokens)
+        self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
+        self._all_labels.extend([-100] * len(sample_tokens))
+        
+        # ---
+        img_tokens = ["<vision>"]
+        cur_patch_indices = [NON_VISION_TOKEN]
+        for row_idx in range(n_rows):
+            for col_idx in range(n_cols):
+                if row_idx != 0 and col_idx == 0: # when new row starts
+                    img_tokens.append(f"<vrow_sep>")
+                    cur_patch_indices.append(NON_VISION_TOKEN)
+                img_tokens.append(f"<vpatch>")
+                cur_patch_indices.append(len(self._all_vision_patches) + row_idx * n_cols + col_idx)
+        img_tokens.append("<vision>")
+        cur_patch_indices.append(NON_VISION_TOKEN)
+        cur_tokens = self._tokenizer.encode(''.join(img_tokens), bos=False, eos=False)
+        # cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
+        assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
+        self._all_tokens.extend(cur_tokens)
+        self._all_vision_patches_indices.extend(cur_patch_indices)
+        noise_patches = self.create_noise(n_patches)
+        noisy_image_patches = alpha_t.sqrt() * patches.numpy() + (1 - alpha_t).sqrt() * noise_patches
+        self._all_vision_patches.extend(noisy_image_patches.numpy().astype(np.float16))
+        self._all_noise.extend(noise_patches)
+        self._all_labels.extend([-100] * len(cur_tokens))        
+        
+        
+        
+        
 
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
         NON_VISION_TOKEN = -1
+        data_iter_1 = self._get_data_iter()
+        data_iter_2 = self._get_data_iter_2()
+        self.betas = self.get_betas()
+        
+        
         while True:
-            for sample in self._get_data_iter():
+            
+            while len(self._all_tokens) < max_buffer_token_len:
+                sample = next(data_iter_1)
+                self.add_diffusion_data(sample)
+            while len(self._all_tokens_language) < max_buffer_token_len:
+                sample = next(data_iter_2)
                 content = sample['content']
-                content_bef = content[0]
-                content_aft = content[1]
-                if content_bef['type'] == 'text':
-                    sample_text = content_bef['text']
-                    image = content_aft['image_url']['url']
-                else:
-                    sample_text = content_aft['text']
-                    image = content_bef['image_url']['url']
-                patches = convert_image_base64_to_patches(image)
-                n_rows, n_cols = patches.shape[:2]
-                n_patches = n_rows * n_cols
-    
-                patches = patches.view(n_patches, -1) # shape: (w_patch_num * h_patch_num, patch_size * patch_size * 3)
-                # ---
-                img_tokens = ["<vision>"]
-                cur_patch_indices = [NON_VISION_TOKEN]
-                
-                for row_idx in range(n_rows):
-                    for col_idx in range(n_cols):
-                        if row_idx != 0 and col_idx == 0: # when new row starts
-                            img_tokens.append(f"<vrow_sep>")
-                            cur_patch_indices.append(NON_VISION_TOKEN)
-                        img_tokens.append(f"<vpatch>")
-                        cur_patch_indices.append(len(self._all_vision_patches) + row_idx * n_cols + col_idx)
-                img_tokens.append("<vision>")
-                cur_patch_indices.append(NON_VISION_TOKEN)
-                
-                cur_tokens = self._tokenizer.encode(''.join(img_tokens), bos=False, eos=False)
-                # cur_tokens = self._tokenizer.convert_tokens_to_ids(img_tokens) # return a list of int
-                assert len(cur_tokens) == len(cur_patch_indices), f"{len(cur_tokens)} != {len(cur_patch_indices)}"
-                
-                self._all_tokens.extend(cur_tokens)
-                self._all_vision_patches_indices.extend(cur_patch_indices)
-                self._all_vision_patches.extend(patches.numpy().astype(np.float16))
-                self._all_labels.extend([-100] * len(cur_tokens))
-                
-                sample_tokens = self._tokenizer.encode(sample_text, bos=False, eos=False)
-                self._all_tokens.extend(sample_tokens)
-                self._all_vision_patches_indices.extend([NON_VISION_TOKEN] * len(sample_tokens))
-                self._all_labels.extend(sample_tokens)
-                
-                  
-                self._sample_idx += 1
-                while len(self._all_tokens) >= max_buffer_token_len:
+                sample_text = content[0]['text']
+                sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
+                self._all_tokens_language.extend(sample_tokens)
+            while len(self._all_tokens_vl) < max_buffer_token_len:
+                sample = next(data_iter_1)
+                self.add_vl_data(sample)
+            
+            
+            if np.random.rand() < self.language_data_ratio:
+                # generate the language data
+                # logger.info("HERE1")
+                x = torch.LongTensor(self._all_tokens_language[:max_buffer_token_len])
+                # update tokens to the remaining tokens
+                self._all_tokens_language = self._all_tokens_language[max_buffer_token_len:]
+                input = x[:-1]
+                label = x[1:]
+                yield input, label
+            else:
+                if np.random.rand() < self.diffusion_prob:
+                    # logger.info("HERE2")
+                    # doing diffusion
                     x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
                     input_ids = x[:-1]
                     x = torch.LongTensor(self._all_labels[:max_buffer_token_len])
@@ -317,33 +427,55 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
                     # get the max number from indices
                     max_idx = indices.max() + 1
                     indices = indices[:-1]
-                    vision_patches = torch.FloatTensor(np.array(self._all_vision_patches[:max_idx]))
-                    # logger.info(f"vision_patches shape: {vision_patches.shape}")
-                    noise_patches = torch.FloatTensor(self.create_noise(vision_patches.shape[0]))
-                    # add noise_patches to the vision_patches
-                    betas = self.get_betas()
-                    t = torch.randint(0, 1000, (1,)).item()
-                    alpha_t = torch.prod(1 - betas[:t+1])
-                    noisy_image_patches = alpha_t.sqrt() * vision_patches + (1 - alpha_t).sqrt() * noise_patches
-                    # assert indices.shape == input_ids.shape, f"{indices.shape} != {input_ids.shape} {len(self._all_vision_patches_indices)}"
+                    noisy_image_patches = torch.FloatTensor(np.array(self._all_vision_patches[:max_idx]))
+                    noise_patches = torch.FloatTensor(np.array(self._all_noise[:max_idx]))
+
                     
                     # update tokens to the remaining tokens
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     self._all_labels = self._all_labels[max_buffer_token_len:]
                     self._all_vision_patches_indices = self.modify_numbers_numpy(self._all_vision_patches_indices[max_buffer_token_len:], max_idx.item())
                     self._all_vision_patches = self._all_vision_patches[max_idx:]
-                    yield input_ids, label, indices, noisy_image_patches, noise_patches
+                    self._all_noise = self._all_noise[max_idx:]
                     
-            if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_name} has run out of data.")
-                break
-            else:
-                # Reset offset for the next iteration
-                self._sample_idx = 0
-                logger.warning(
-                    f"Dataset {self.dataset_name} is being re-looped. "
-                    "Loss related metrics might be misleading."
-                )
+                    yield input_ids, label, indices, noisy_image_patches, noise_patches
+                
+                else:
+                    # doing image-conditioned language generation
+                    # logger.info("HERE3")
+                    x = torch.LongTensor(self._all_tokens_vl[:max_buffer_token_len])
+                    input_ids = x[:-1]
+                    x = torch.LongTensor(self._all_labels_vl[:max_buffer_token_len])
+                    label = x[1:]
+                    indices = torch.LongTensor(self._all_vision_patches_indices_vl[:max_buffer_token_len])
+                    # get the max number from indices
+                    # logger.info(indices)
+                    max_idx = indices.max() + 1
+                    indices = indices[:-1]
+                    vision_patches = torch.FloatTensor(np.array(self._all_vision_patches_vl[:max_idx]))
+                                
+                    # update tokens to the remaining tokens
+                    self._all_tokens_vl = self._all_tokens_vl[max_buffer_token_len:]
+                    self._all_labels_vl = self._all_labels_vl[max_buffer_token_len:]
+                    self._all_vision_patches_indices_vl = self.modify_numbers_numpy(self._all_vision_patches_indices_vl[max_buffer_token_len:], max_idx.item())
+                    self._all_vision_patches_vl = self._all_vision_patches_vl[max_idx:]
+                    
+                    
+                    # logger.info(f"vision_patches: {vision_patches.shape}, max_idx: {max_idx}")
+                    yield input_ids, label, indices, vision_patches
+                    
+                    
+                
+            # if not self.infinite:
+            #     logger.warning(f"Dataset {self.dataset_name} has run out of data.")
+            #     break
+            # else:
+            #     # Reset offset for the next iteration
+            #     self._sample_idx = 0
+            #     logger.warning(
+            #         f"Dataset {self.dataset_name} is being re-looped. "
+            #         "Loss related metrics might be misleading."
+            #     )
     
     # Noise Schedule (linear beta)
     def get_betas(self, T=1000, beta_start=0.0001, beta_end=0.02):
@@ -381,6 +513,26 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
             return iter([])
         return iter(self._data.skip(self._sample_idx))
 
+    def _get_data_iter_2(self):
+        if self._sample_idx == 0:
+            return iter(self._data_2)
+
+        # Skip samples
+        if isinstance(self._data_2, IterableDataset):
+            it = iter(self._data_2)
+            # Naively iterate through the samples as skip may not be supported
+            for _ in range(self._sample_idx):
+                next(it)
+            return it
+
+        # As skipping to the end throws an error in case of map-style dataset, return an empty iterator
+        if self._sample_idx == len(self._data_2):
+            return iter([])
+        return iter(self._data_2.skip(self._sample_idx))
+
+
+    
+    
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
         self._all_tokens = state_dict["token_buffer"]
