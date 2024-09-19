@@ -347,16 +347,17 @@ def main(job_config: JobConfig):
         wandb.login()
         run = wandb.init(
         # Set the project where this run will be logged
-            project="TEST",
+            project="SOLO2.0",
             # Track hyperparameters and run metadata
-            config={
-                "learning_rate": 0.01,
-                "epochs": 10,
-            },
-            name='test'
+            # config={
+            #     "learning_rate": 0.01,
+            #     "epochs": 10,
+            # },
+            name='test-1'
     )
     
-    
+    microbatch = job_config.training.microbatch
+    diffusion_prob = job_config.training.diffusion_prob
     
     # train loop
     logger.info(f"Training starts at step {train_state.step + 1}")
@@ -370,80 +371,84 @@ def main(job_config: JobConfig):
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
                 gc.collect(1)
 
-            # get batch
-            data_load_start = timer()
-            batch = next(data_iterator)
-            # send all items to GPU, and use tuple
-            batch = tuple(item.cuda() for item in batch)
-            if len(batch) == 5:
-                # diffusion loss
-                input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
-                loss_type = "Diffusion"
-            else:
-                if len(batch) == 2:
-                    # language-only 
-                    input_ids, labels = batch
-                    visual_patches_indices, visual_patches, noise_patches = None, None, None
-                    loss_type = "Language"
-                else:
-                    input_ids, labels, visual_patches_indices, visual_patches = batch
-                    noise_patches = None
-                    loss_type = "Image-Conditioned Language"
-                    
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(timer() - data_load_start)
-
-
             optimizers.zero_grad()
+            
+            
+            
+            for microbatch_idx in range(job_config.training.microbatch):
+                # get batch
+                data_load_start = timer()
+                batch = next(data_iterator)
+                # send all items to GPU, and use tuple
+                batch = tuple(item.cuda() for item in batch)
+                input_ids, labels, visual_patches_indices, visual_patches, noise_patches, noise_indices = batch
+                # if len(batch) == 5:
+                #     # diffusion loss
+                #     input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
+                #     loss_type = "Diffusion"
+                # else:
+                #     if len(batch) == 2:
+                #         # language-only 
+                #         input_ids, labels = batch
+                #         visual_patches_indices, visual_patches, noise_patches = None, None, None
+                #         loss_type = "Language"
+                #     else:
+                #         input_ids, labels, visual_patches_indices, visual_patches = batch
+                #         noise_patches = None
+                #         loss_type = "Image-Conditioned Language"
+                        
+                ntokens_since_last_log += labels.numel()
+                data_loading_times.append(timer() - data_load_start)
+                if parallel_dims.pp_enabled:
+                    # pipeline parallel forward / backward inside step() call
+                    # not working here, need to fix
+                    is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-            if parallel_dims.pp_enabled:
-                # pipeline parallel forward / backward inside step() call
-                
-                
-                # not working here, need to fix
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+                    with loss_parallel_ctx():
+                        if pp_mesh.get_local_rank() == 0:
+                            pp_schedule.step(input_ids)
+                        elif is_last_stage:
+                            losses = []
+                            pp_schedule.step(target=labels, losses=losses)
+                        else:
+                            pp_schedule.step()
 
-                with loss_parallel_ctx():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
-                    else:
-                        pp_schedule.step()
-
-                # accumulate losses across pipeline microbatches
-                loss = (
-                    torch.mean(torch.stack(losses))
-                    if is_last_stage
-                    else torch.Tensor([-1.0])
-                )
-            else:
-                # Non-PP forward / backward
-                with loss_parallel_ctx():
-                    # # only support batch size 1. Need to fix the code when batch size > 1 for the indices extraction for image patches
-                    assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
-                    # label_diffusion = deepcopy(noise_patches) 
-                    # get the indices of all >= 0 items in the visual_patches_indices
-                    pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
-                    # pred_diffusion: (bs, seq_len, 3072)
-                    if noise_patches is not None:
-                        # do diffusion
-                        _, indices = torch.where(visual_patches_indices != -1)
+                    # accumulate losses across pipeline microbatches
+                    loss = (
+                        torch.mean(torch.stack(losses))
+                        if is_last_stage
+                        else torch.Tensor([-1.0])
+                    )
+                else:
+                    # Non-PP forward / backward
+                    model.set_requires_gradient_sync(microbatch_idx==(microbatch-1))
+                    with loss_parallel_ctx():
+                        # # only support batch size 1. Need to fix the code when batch size > 1 for the indices extraction for image patches
+                        assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
+                        # label_diffusion = deepcopy(noise_patches) 
+                        # get the indices of all >= 0 items in the visual_patches_indices
+                        pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
+                        language_loss = loss_fn(pred, labels) 
+                    
+                        _, indices = torch.where(noise_indices != -1)
                         pred_diffusion = pred_diffusion[:, indices, :]
                         if pred_diffusion.shape[1] != noise_patches.shape[1]:
                             noise_patches = noise_patches[:, :-1, :]
-                        loss = loss_fn_diffusion(pred_diffusion, noise_patches)
-                    else:
-                        loss = loss_fn(pred, labels)
-                    
-                    if torch.distributed.get_rank() == 0:
-                        wandb.log({loss_type: loss})
-                    
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
+                        diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
+                     
+                        loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
+                        loss = loss_all / microbatch                    
+                        if torch.distributed.get_rank() == 0:
+                            wandb.log({"Total Loss": loss_all.item(), "Diffusion Loss": diffusion_loss.item(), "Language Loss": language_loss.item()})
+                        
+                        # pred.shape=(bs, seq_len, vocab_size)
+                        # need to free to before bwd to avoid peaking memory
+                        del pred
+                        loss.backward()
+            
+            
+            
+            
 
             # clip gradients
             for model in model_parts:
@@ -469,7 +474,7 @@ def main(job_config: JobConfig):
                 # it issues a single all-reduce for all parameters at once for better performance
                 precompute_float8_dynamic_scale_for_fsdp(model)
 
-            losses_since_last_log.append(loss)
+            losses_since_last_log.append(loss_all)
 
             # log metrics
             if (
