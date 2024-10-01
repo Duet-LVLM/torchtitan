@@ -353,10 +353,10 @@ class Transformer(nn.Module):
     def __init__(self, model_args: ModelArgs):
         super().__init__()
         self.model_args = model_args
-        self.vocab_size = model_args.vocab_size
+        self.vocab_size = model_args.vocab_size if model_args.vocab_size > 0 else 128256
         self.n_layers = model_args.n_layers
 
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.tok_embeddings = nn.Embedding(self.vocab_size, model_args.dim)
         self.embed_vision_patch = nn.Linear(
             model_args.vision_patch_size * model_args.vision_patch_size * 3,  # 32 * 32 * 3,
             model_args.dim,
@@ -379,8 +379,7 @@ class Transformer(nn.Module):
         self.norm = create_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
-
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.output = nn.Linear(model_args.dim, self.vocab_size, bias=False)
         self.diffusion_head = nn.Linear(model_args.dim, 3072, bias=False)
         self.init_weights()
 
@@ -499,3 +498,134 @@ class Transformer(nn.Module):
 
         """
         return cls(model_args)
+
+    
+    
+    def generate(
+        self,
+        tokens: torch.Tensor,
+        max_length: int = 100,
+        eos_token_id: int = None,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        do_sample: bool = True,
+        vision_patches: Optional[torch.Tensor] = None,
+        vision_patch_indices: Optional[torch.Tensor] = None
+    ):
+        """
+        Generate tokens using the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input token indices of shape (batch_size, seq_len).
+            max_length (int): Maximum length of generated tokens.
+            eos_token_id (int): ID of the end-of-sequence token.
+            temperature (float): Temperature for sampling.
+            top_k (int): The number of highest probability vocabulary tokens to keep for top-k-filtering.
+            top_p (float): If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation.
+            do_sample (bool): Whether to sample the next token or take the most probable one.
+            vision_patches (Optional[torch.Tensor]): Vision patches tensor.
+            vision_patch_indices (Optional[torch.Tensor]): Indices for vision patches.
+
+        Returns:
+            torch.Tensor: Generated token indices of shape (batch_size, generated_seq_len).
+        """
+        generated_tokens = tokens.clone()
+        batch_size = tokens.size(0)
+        device = tokens.device
+        
+
+        # Initialize a mask to keep track of which sequences have finished
+        unfinished_sequences = torch.ones(batch_size, dtype=torch.bool, device=device)
+
+        for _ in range(max_length):
+            # Pass the tokens through the model
+            output_logits, _ = self.forward(generated_tokens, vision_patches, vision_patch_indices)
+            # Get logits for the last token position
+            next_token_logits = output_logits[:, -1, :]  # Shape: (batch_size, vocab_size)
+
+            # Apply temperature
+            if temperature != 1.0:
+                next_token_logits = next_token_logits / temperature
+
+            # Optionally apply top-k and/or top-p filtering
+            if top_k > 0 or top_p > 0.0:
+                next_token_logits = self._top_k_top_p_filtering(next_token_logits, top_k=top_k, top_p=top_p)
+
+            if do_sample:
+                # Sample the next token
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            else:
+                # Greedy decoding
+                next_tokens = torch.argmax(next_token_logits, dim=-1)
+
+            # Mask out tokens for sequences that have already finished
+            next_tokens = next_tokens * unfinished_sequences + eos_token_id * (~unfinished_sequences)
+
+            # Append the next token to the generated tokens
+            generated_tokens = torch.cat([generated_tokens, next_tokens.unsqueeze(-1)], dim=1)
+
+            # update vision_patch_indices
+            if vision_patch_indices is not None:
+                vision_patch_indices = torch.cat(
+                    [
+                        vision_patch_indices,
+                        torch.ones(batch_size, 1, dtype=torch.long, device=device) * -1,
+                    ],
+                    dim=1,
+                )
+            
+            
+            # Update the unfinished sequences mask
+            if eos_token_id is not None:
+                unfinished_sequences = unfinished_sequences & (next_tokens != eos_token_id)
+                if not unfinished_sequences.any():
+                    break
+
+        return generated_tokens
+
+    @staticmethod
+    def _top_k_top_p_filtering(
+        logits: torch.Tensor,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        filter_value: float = -float('Inf'),
+    ):
+        """
+        Filter a distribution of logits using top-k and/or nucleus (top-p) filtering.
+
+        Args:
+            logits (torch.Tensor): Logits distribution of shape (batch_size, vocab_size).
+            top_k (int): Keep only top k tokens with highest probability (top-k filtering).
+            top_p (float): Keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+            filter_value (float): Value to replace filtered logits with.
+
+        Returns:
+            torch.Tensor: Filtered logits.
+        """
+        assert logits.dim() == 2  # batch_size x vocab_size
+
+        top_k = min(top_k, logits.size(-1))  # Safety check
+
+        if top_k > 0:
+            # Remove all tokens with a probability less than the last token of the top-k
+            indices_to_remove = logits < torch.topk(logits, top_k)[0][:, -1, None]
+            logits = logits.masked_fill(indices_to_remove, filter_value)
+
+        if top_p > 0.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+
+            # Shift the indices to the right to keep also the first token above the threshold
+            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+            sorted_indices_to_remove[:, 0] = False
+
+            # Scatter sorted tensors back to original indexing
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits = logits.masked_fill(indices_to_remove, filter_value)
+
+        return logits

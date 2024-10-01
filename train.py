@@ -436,7 +436,11 @@ def main(job_config: JobConfig):
                             noise_patches = noise_patches[:, :-1, :]
                         diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
                      
-                        loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
+                        # loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
+                        if np.isnan(language_loss.item()):
+                            loss_all = diffusion_loss
+                        else:
+                            loss_all = language_loss + diffusion_loss
                         loss = loss_all / microbatch                    
                         if torch.distributed.get_rank() == 0:
                             wandb.log({"Total Loss": loss_all.item(), "Diffusion Loss": diffusion_loss.item(), "Language Loss": language_loss.item()})
