@@ -447,9 +447,6 @@ def main(job_config: JobConfig):
                         loss = loss_all / microbatch                    
                         if torch.distributed.get_rank() == 0:
                             wandb.log({f"{loss_type} Loss": loss_all.item()})
-                          
-                        
-                        
                         # need to free to before bwd to avoid peaking memory
                         del pred
                         loss.backward()
