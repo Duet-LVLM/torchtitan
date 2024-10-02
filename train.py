@@ -370,11 +370,7 @@ def main(job_config: JobConfig):
             train_state.step += 1
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
                 gc.collect(1)
-
             optimizers.zero_grad()
-            
-            
-            
             for microbatch_idx in range(job_config.training.microbatch):
                 # get batch
                 data_load_start = timer()
@@ -435,17 +431,25 @@ def main(job_config: JobConfig):
                         if pred_diffusion.shape[1] != noise_patches.shape[1]:
                             noise_patches = noise_patches[:, :-1, :]
                         diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
-                     
-                        # loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
-                        if np.isnan(language_loss.item()):
-                            loss_all = diffusion_loss
+                        if pred_diffusion.shape[1] > 1000:
+                            loss_type = 'Diffusion'
+                            language_loss = 0
                         else:
-                            loss_all = language_loss + diffusion_loss
+                            diffusion_loss = 0
+                            if visual_patches.shape[1] < 100:
+                                loss_type = 'Language'
+                            else:
+                                loss_type = 'VL'
+                    
+                        # logger.info(f"Loss type: {loss_type}")
+                        # loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
+                        loss_all = language_loss + diffusion_loss
                         loss = loss_all / microbatch                    
                         if torch.distributed.get_rank() == 0:
-                            wandb.log({"Total Loss": loss_all.item(), "Diffusion Loss": diffusion_loss.item(), "Language Loss": language_loss.item()})
+                            wandb.log({f"{loss_type} Loss": loss_all.item()})
+                          
                         
-                        # pred.shape=(bs, seq_len, vocab_size)
+                        
                         # need to free to before bwd to avoid peaking memory
                         del pred
                         loss.backward()

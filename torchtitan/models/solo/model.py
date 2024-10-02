@@ -457,13 +457,18 @@ class Transformer(nn.Module):
                 # === Handle vision patches ===
                 if vision_patches is not None and vision_patches.size(0) > 0:
                     # vision_patches = vision_patches + noise_patches
-                    
+                 
                     vision_embeds = self.embed_vision_patch(
                         vision_patches
                     )  # (n_patches, hidden_size)
+                  
+                    if vision_embeds.shape[1] == 1:
+                        vision_embeds = vision_embeds[0]
+                    else:
+                        vision_embeds = vision_embeds.squeeze()
                     vision_embeds = torch.cat(
                         [
-                            vision_embeds.squeeze(), # 【993, 4096]
+                            vision_embeds, # 【993, 4096]
                             torch.zeros(1, self.model_args.dim).to(vision_embeds.device),  # add a dummy token (for text)
                         ]
                     )  # (n_patches + 1, hidden_size) # [1, 994, 4096]
@@ -471,6 +476,7 @@ class Transformer(nn.Module):
                     # - text tokens are -1 (map to the dummy zero tensor)
                     # - vision tokens are 0~n_patches (map to the corresponding vision_embeds)
                     # logger.info(f"vision_patch_indices: {vision_patch_indices.shape}, vision_embeds: {vision_embeds.shape}")
+                    # logger.info(vision_patch_indices)
                     vision_embeds = vision_embeds[
                         vision_patch_indices
                     ]  # (batch_size, seq_length, hidden_size)
