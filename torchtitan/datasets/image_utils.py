@@ -15,7 +15,7 @@ def get_resize_output_image_size(
 ) -> tuple:
     #
     # return 1024, 1024  
-    # return 256, 256
+    return 256, 256
     l1, l2 = image_size # 540, 32
     short, long = (l2, l1) if l2 <= l1 else (l1, l2)
 
@@ -126,6 +126,35 @@ def visualize_patches(img_patches, figsize=(6, 6)):
     plt.imshow(full_image)
     plt.axis('off')  # Hide axes ticks
     plt.show()
+
+
+
+def recover_patches(img_patches):
+    assert len(img_patches.shape) == 5, "Input should be a 5D tensor"
+    n_width_patches, n_height_patches = img_patches.shape[1], img_patches.shape[0]
+    width, height = n_width_patches * PATCH_SIZE, n_height_patches * PATCH_SIZE
+
+    # Calculate the total width and height with black lines included
+    total_width = width + (n_width_patches - 1)  # add space for black lines between patches
+    total_height = height + (n_height_patches - 1)  # add space for black lines between patches
+
+    # Create an empty image to place the patches
+    full_image = Image.new('RGB', (total_width, total_height))
+
+    for row_id in range(img_patches.shape[0]):
+        for col_id in range(img_patches.shape[1]):
+            patch = img_patches[row_id, col_id]
+            patch = get_reverse_transform()(patch)
+            # Calculate top left position of where to paste the patch
+            top = row_id * (PATCH_SIZE + 1)  # include space for a black line
+            left = col_id * (PATCH_SIZE + 1)  # include space for a black line
+            full_image.paste(patch, (left, top))
+    return full_image
+
+
+
+
+
 
 # MAX_RESOLUTION = 1024
 # BIN_NUMBER = 1024

@@ -380,7 +380,7 @@ class Transformer(nn.Module):
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
         self.output = nn.Linear(model_args.dim, self.vocab_size, bias=False)
-        self.diffusion_head = nn.Linear(model_args.dim, 3072, bias=False)
+        self.diffusion_head = nn.Linear(model_args.dim, model_args.vision_patch_size * 3 * model_args.vision_patch_size, bias=False)
         self.init_weights()
 
     def init_weights(self):
