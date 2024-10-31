@@ -514,7 +514,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
 
 
     def create_noise(self, n_patches):
-        return np.random.normal(0, 1, (n_patches, 3072))
+        return np.random.normal(0, 1, (n_patches, 32*32*3))
     
     
     
@@ -536,6 +536,7 @@ class HuggingFaceDatasetVL(IterableDataset, Stateful):
         return iter(self._data.skip(self._sample_idx))
 
     def _get_data_iter_2(self):
+        return iter(self._data_2)
         if self._sample_idx == 0:
             return iter(self._data_2)
 

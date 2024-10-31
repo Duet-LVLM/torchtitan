@@ -382,7 +382,7 @@ class Transformer(nn.Module):
         self.output = nn.Linear(model_args.dim, self.vocab_size, bias=False)
         self.diffusion_head = nn.Linear(model_args.dim, model_args.vision_patch_size * 3 * model_args.vision_patch_size, bias=False)
         self.init_weights()
-
+        
     def init_weights(self):
         """
         [Note: On ``init_weights`` vs. ``reset_parameters``]
@@ -457,7 +457,6 @@ class Transformer(nn.Module):
                 # === Handle vision patches ===
                 if vision_patches is not None and vision_patches.size(0) > 0:
                     # vision_patches = vision_patches + noise_patches
-                 
                     vision_embeds = self.embed_vision_patch(
                         vision_patches
                     )  # (n_patches, hidden_size)
