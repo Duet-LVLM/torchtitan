@@ -8,7 +8,7 @@ import contextlib
 import gc
 import os
 import time
-
+import wandb
 from dataclasses import dataclass, field
 from datetime import timedelta
 from io import BytesIO
@@ -37,6 +37,7 @@ from torchtitan.parallelisms import (
     models_pipelining_fns,
     ParallelDims,
 )
+from copy import deepcopy
 from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import (
@@ -140,7 +141,6 @@ def build_optimizers(model_parts, job_config: JobConfig):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
-
     # used for colorful printing
     color = Color if job_config.metrics.enable_color_printing else NoColor
 
@@ -198,8 +198,16 @@ def main(job_config: JobConfig):
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
+        # logger.info(f"pred: {pred.flatten(0,1).shape}, labels: {labels.flatten(0,1).shape}")
         return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
+    
+    def loss_fn_diffusion(pred, labels):
+        # implement the MSE loss for the diffusion model
+        return F.mse_loss(pred, labels)
+    
+    
+    
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
@@ -334,7 +342,23 @@ def main(job_config: JobConfig):
     data_loading_times: List[float] = []
     time_last_log = timer()
     gpu_memory_monitor.reset_peak_stats()
-
+    if torch.distributed.get_rank() == 0:
+        logger.info(f"init wandb")
+        wandb.login()
+        run = wandb.init(
+        # Set the project where this run will be logged
+            project="SOLO2.0",
+            # Track hyperparameters and run metadata
+            # config={
+            #     "learning_rate": 0.01,
+            #     "epochs": 10,
+            # },
+            name='test-1'
+    )
+    
+    microbatch = job_config.training.microbatch
+    diffusion_prob = job_config.training.diffusion_prob
+    
     # train loop
     logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_enable_profiling(
@@ -346,46 +370,90 @@ def main(job_config: JobConfig):
             train_state.step += 1
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
                 gc.collect(1)
-
-            # get batch
-            data_load_start = timer()
-            batch = next(data_iterator)
-            input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(timer() - data_load_start)
-
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
             optimizers.zero_grad()
+            for microbatch_idx in range(job_config.training.microbatch):
+                # get batch
+                data_load_start = timer()
+                batch = next(data_iterator)
+                # send all items to GPU, and use tuple
+                batch = tuple(item.cuda() for item in batch)
+                input_ids, labels, visual_patches_indices, visual_patches, noise_patches, noise_indices = batch
+                # if len(batch) == 5:
+                #     # diffusion loss
+                #     input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
+                #     loss_type = "Diffusion"
+                # else:
+                #     if len(batch) == 2:
+                #         # language-only 
+                #         input_ids, labels = batch
+                #         visual_patches_indices, visual_patches, noise_patches = None, None, None
+                #         loss_type = "Language"
+                #     else:
+                #         input_ids, labels, visual_patches_indices, visual_patches = batch
+                #         noise_patches = None
+                #         loss_type = "Image-Conditioned Language"
+                        
+                ntokens_since_last_log += labels.numel()
+                data_loading_times.append(timer() - data_load_start)
+                if parallel_dims.pp_enabled:
+                    # pipeline parallel forward / backward inside step() call
+                    # not working here, need to fix
+                    is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-            if parallel_dims.pp_enabled:
-                # pipeline parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+                    with loss_parallel_ctx():
+                        if pp_mesh.get_local_rank() == 0:
+                            pp_schedule.step(input_ids)
+                        elif is_last_stage:
+                            losses = []
+                            pp_schedule.step(target=labels, losses=losses)
+                        else:
+                            pp_schedule.step()
 
-                with loss_parallel_ctx():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
-                    else:
-                        pp_schedule.step()
-
-                # accumulate losses across pipeline microbatches
-                loss = (
-                    torch.mean(torch.stack(losses))
-                    if is_last_stage
-                    else torch.Tensor([-1.0])
-                )
-            else:
-                # Non-PP forward / backward
-                with loss_parallel_ctx():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
+                    # accumulate losses across pipeline microbatches
+                    loss = (
+                        torch.mean(torch.stack(losses))
+                        if is_last_stage
+                        else torch.Tensor([-1.0])
+                    )
+                else:
+                    # Non-PP forward / backward
+                    model.set_requires_gradient_sync(microbatch_idx==(microbatch-1))
+                    with loss_parallel_ctx():
+                        # # only support batch size 1. Need to fix the code when batch size > 1 for the indices extraction for image patches
+                        assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
+                        # label_diffusion = deepcopy(noise_patches) 
+                        # get the indices of all >= 0 items in the visual_patches_indices
+                        pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
+                        language_loss = loss_fn(pred, labels) 
+                    
+                        _, indices = torch.where(noise_indices != -1)
+                        pred_diffusion = pred_diffusion[:, indices, :]
+                        if pred_diffusion.shape[1] != noise_patches.shape[1]:
+                            noise_patches = noise_patches[:, :-1, :]
+                        diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
+                        if pred_diffusion.shape[1] > 1000:
+                            loss_type = 'Diffusion'
+                            language_loss = 0
+                        else:
+                            diffusion_loss = 0
+                            if visual_patches.shape[1] < 100:
+                                loss_type = 'Language'
+                            else:
+                                loss_type = 'VL'
+                    
+                        # logger.info(f"Loss type: {loss_type}")
+                        # loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
+                        loss_all = language_loss + diffusion_loss
+                        loss = loss_all / microbatch                    
+                        if torch.distributed.get_rank() == 0:
+                            wandb.log({f"{loss_type} Loss": loss_all.item()})
+                        # need to free to before bwd to avoid peaking memory
+                        del pred
+                        loss.backward()
+            
+            
+            
+            
 
             # clip gradients
             for model in model_parts:
@@ -411,7 +479,7 @@ def main(job_config: JobConfig):
                 # it issues a single all-reduce for all parameters at once for better performance
                 precompute_float8_dynamic_scale_for_fsdp(model)
 
-            losses_since_last_log.append(loss)
+            losses_since_last_log.append(loss_all)
 
             # log metrics
             if (

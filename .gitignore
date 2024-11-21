@@ -12,8 +12,13 @@ out
 wandb
 
 torchtitan/datasets/**/*.model
-
+torchtitan/datasets/raw_data
+torchtitan/datasets/processed
 # temp files
 *.log
 error.json
 _remote_module_non_scriptable.py
+outputs
+Meta-Llama-3-8B
+llama3-8B
+wandb
