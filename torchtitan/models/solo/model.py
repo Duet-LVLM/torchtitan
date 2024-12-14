@@ -481,14 +481,16 @@ class Transformer(nn.Module):
                     ]  # (batch_size, seq_length, hidden_size)
                     # merge vision_embeds with inputs_embeds
                     h += vision_embeds
-      
+        # copy h
+        first_layer_rep = h.detach().clone()
+        
         for i, layer in enumerate(self.layers.values()):
             h = layer(h, self.freqs_cis)
         # logger.info(h.device)
         h = self.norm(h) if self.norm else h
         output = self.output(h).float() if self.output else h
         output_diffusion = self.diffusion_head(h).float() if self.diffusion_head else h
-        return output, output_diffusion
+        return output, output_diffusion, h, first_layer_rep
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
@@ -545,7 +547,7 @@ class Transformer(nn.Module):
 
         for _ in range(max_length):
             # Pass the tokens through the model
-            output_logits, _ = self.forward(generated_tokens, vision_patches, vision_patch_indices)
+            output_logits, _, _, _ = self.forward(generated_tokens, vision_patches, vision_patch_indices)
             # Get logits for the last token position
             next_token_logits = output_logits[:, -1, :]  # Shape: (batch_size, vocab_size)
 

@@ -7,15 +7,17 @@ from math import ceil
 from PIL import Image
 import matplotlib.pyplot as plt
 
-PATCH_SIZE = 32
+Image.MAX_IMAGE_PIXELS = None
+Image.warnings.simplefilter('ignore', Image.DecompressionBombWarning)
+
+PATCH_SIZE = 32  
 MAX_RESOLUTION = 1024 # 32 * 32
 
 def get_resize_output_image_size(
     image_size,
 ) -> tuple:
     #
-    # return 1024, 1024  
-    return 256, 256
+    # return 224, 224
     l1, l2 = image_size # 540, 32
     short, long = (l2, l1) if l2 <= l1 else (l1, l2)
 
@@ -57,6 +59,15 @@ def get_transform(height, width):
     return preprocess_transform
 
 def get_reverse_transform():
+    # reverse_transform = transforms.Compose([
+    #     transforms.Normalize(
+    #         mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+    #         std=[1/0.229, 1/0.224, 1/0.225]
+    #     ),
+    #     transforms.ToPILImage()
+    # ])
+    # return reverse_transform
+
     reverse_transform = transforms.Compose([
         transforms.Normalize(mean=[0, 0, 0], std=[1/0.229, 1/0.224, 1/0.225]),
         transforms.Normalize(mean=[-0.485, -0.456, -0.406], std=[1, 1, 1]),
@@ -96,7 +107,7 @@ def convert_image_base64_to_patches(base64_image: str) -> torch.Tensor:
     new_width, new_height = get_resize_output_image_size((width, height))
     img_tensor = get_transform(new_height, new_width)(img_pil) # 3， height, width 
     # transform the process img to seq_length, 64*64*3
-    img_patches = preprocess_image(img_tensor) # seq_length, 64*64*3
+    img_patches = preprocess_image(img_tensor) 
     return img_patches
 
 

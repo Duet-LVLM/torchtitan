@@ -378,21 +378,7 @@ def main(job_config: JobConfig):
                 # send all items to GPU, and use tuple
                 batch = tuple(item.cuda() for item in batch)
                 input_ids, labels, visual_patches_indices, visual_patches, noise_patches, noise_indices = batch
-                # if len(batch) == 5:
-                #     # diffusion loss
-                #     input_ids, labels, visual_patches_indices, visual_patches, noise_patches = batch
-                #     loss_type = "Diffusion"
-                # else:
-                #     if len(batch) == 2:
-                #         # language-only 
-                #         input_ids, labels = batch
-                #         visual_patches_indices, visual_patches, noise_patches = None, None, None
-                #         loss_type = "Language"
-                #     else:
-                #         input_ids, labels, visual_patches_indices, visual_patches = batch
-                #         noise_patches = None
-                #         loss_type = "Image-Conditioned Language"
-                        
+                
                 ntokens_since_last_log += labels.numel()
                 data_loading_times.append(timer() - data_load_start)
                 if parallel_dims.pp_enabled:
@@ -423,37 +409,72 @@ def main(job_config: JobConfig):
                         assert input_ids.shape[0] == 1, "Only support batch size 1 for now."
                         # label_diffusion = deepcopy(noise_patches) 
                         # get the indices of all >= 0 items in the visual_patches_indices
-                        pred, pred_diffusion = model(input_ids, visual_patches, visual_patches_indices)
+                        pred, pred_diffusion, hidden_state, first_layer_rep = model(input_ids, visual_patches, visual_patches_indices)
                         language_loss = loss_fn(pred, labels) 
                     
                         _, indices = torch.where(noise_indices != -1)
+                        
                         pred_diffusion = pred_diffusion[:, indices, :]
+                        # logger.info(f"{pred_diffusion.shape}, {noise_patches.shape}")
                         if pred_diffusion.shape[1] != noise_patches.shape[1]:
                             noise_patches = noise_patches[:, :-1, :]
-                        diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
-                        if pred_diffusion.shape[1] > 1000:
-                            loss_type = 'Diffusion'
-                            language_loss = 0
-                        else:
+                        
+                        
+                        
+                        
+                        # logger.info(f"{pred_diffusion.shape}, {noise_patches.shape}")
+                        if pred_diffusion.shape[1] == 0:
                             diffusion_loss = 0
-                            if visual_patches.shape[1] < 100:
-                                loss_type = 'Language'
+                        else:
+                            diffusion_loss = loss_fn_diffusion(pred_diffusion, noise_patches)
+                        
+                        if visual_patches.shape[1] < 100:
+                            diffusion_loss = 0
+                            if torch.distributed.get_rank() == 0:
+                                wandb.log({"Language Loss": language_loss.item()})       
+                        else:
+                            # judge whether the language loss is torch.tensor(nan)
+                            if torch.isnan(language_loss):
+                                language_loss = 0
+                                # check whether the largest number in indices is equal to 8191 
+                                # if torch.max(indices) == 8191:
+                                    # logger.info("Large")
+                                    # indices = indices[:-1]                
+                                                
+                                # hidden_state = hidden_state[:, indices, :]
+                                # first_layer_rep = first_layer_rep[:, indices+1, :]
+                                # reguralization_loss = loss_fn_diffusion(hidden_state, first_layer_rep) 
+                                # diffusion_loss = diffusion_loss + reguralization_loss
+                                if torch.distributed.get_rank() == 0:
+                                    wandb.log({"Construction Loss": diffusion_loss.item()})      # "Reguralization Loss": reguralization_loss.item()
                             else:
-                                loss_type = 'VL'
+                                diffusion_loss = 0
+                                if torch.distributed.get_rank() == 0:
+                                    # "Construction Loss": diffusion_loss.item()
+                                    wandb.log({"VL Loss": language_loss.item()})
+                        # if pred_diffusion.shape[1] > 1000:
+                        #     loss_type = 'Diffusion'
+                        #     language_loss = 0
+                        # else:
+                        #     diffusion_loss = 0
+                        #     if visual_patches.shape[1] < 100:
+                        #         loss_type = 'Language'
+                        #     else:
+                        #         loss_type = 'VL'
                     
                         # logger.info(f"Loss type: {loss_type}")
                         # loss_all = (1- diffusion_prob) * language_loss + diffusion_prob * diffusion_loss
                         loss_all = language_loss + diffusion_loss
                         loss = loss_all / microbatch                    
-                        if torch.distributed.get_rank() == 0:
-                            wandb.log({f"{loss_type} Loss": loss_all.item()})
+                        # if torch.distributed.get_rank() == 0:
+                        #         wandb.log({f"{loss_type} Loss": language_loss.item()})
                         # need to free to before bwd to avoid peaking memory
                         del pred
                         loss.backward()
             
-            
-            
-            
+        
+        
+        
 
             # clip gradients
             for model in model_parts:
